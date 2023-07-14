@@ -81,6 +81,18 @@ def decode_cmd_body(cmd_body: bytes | bytearray, dev_type: int, cmd: int) -> dic
     elif dev_type == 4:
         if cmd == 2:
             data['dev_name'] = cmd_body[1:].decode('ascii')
+    elif dev_type == 3:
+        if cmd == 2:
+            length = cmd_body[0]
+            data['dev_name'] = cmd_body[1:length + 1].decode('ascii')
+            dev_names = []
+            i = length + 2
+            for _ in range(cmd_body[i - 1]):
+                length = cmd_body[i]
+                new_name = cmd_body[i+1:i+1+length].decode('ascii')
+                dev_names.append(new_name)
+                i += length + 1
+            data['dev_names'] = dev_names
     return data
 
 
@@ -149,8 +161,11 @@ def main() -> None:
     # print(r.content)
     # decoded_content = base64.urlsafe_b64decode(r.content + b'==')
     # pprint.pprint(decode_packets(decoded_content))
-    r = requests.post("http://localhost:9998")
-    decoded_content = base64.urlsafe_b64decode(r.content + b'==')
+    # r = requests.post("http://localhost:9998")
+    # decoded_content = base64.urlsafe_b64decode(r.content + b'==')
+    # pprint.pprint(decode_packets(decoded_content))
+    decode_string = input().encode('ascii')
+    decoded_content = base64.urlsafe_b64decode(decode_string + b'==')
     pprint.pprint(decode_packets(decoded_content))
 
 
