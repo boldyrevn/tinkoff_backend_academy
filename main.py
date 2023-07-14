@@ -37,10 +37,8 @@ def uleb128_decode(b: bytes | bytearray) -> int:
 
 
 def make_cmd_body(cmd: int, **kwargs) -> bytes:
-    if cmd == 6:
-        timestamp = uleb128_encode(kwargs['timestamp'])
-        return timestamp
-    elif cmd == 1:
+    # WHOISHERE, IAMHERE
+    if cmd == 1 or cmd == 2:
         b = [len(kwargs['dev_name'])]
         dev_name = kwargs['dev_name'].encode()
         b.extend(dev_name)
@@ -72,17 +70,75 @@ def make_packet(payload: bytes) -> bytes:
 
 def decode_cmd_body(cmd_body: bytes | bytearray, dev_type: int, cmd: int) -> dict:
     data = dict()
+    # EnvSensor
+    if dev_type == 2:
+        # WHOISHERE, IAMHERE
+        if cmd == 1 or cmd == 2:
+            length = cmd_body[0]
+            data['dev_name'] = cmd_body[1:length + 1].decode('ascii')
+            dev_props = dict()
+            i = length + 1
+            dev_props['sensors'] = cmd_body[i]
+            i += 1
+            array_len = cmd_body[i]
+            print(f"{array_len=}")
+            triggers: list[dict] = []
+            i += 1
+            for _ in range(array_len):
+                new_trigger = dict()
+                new_trigger['op'] = cmd_body[i]
+                bin_value = bytearray()
+                while True:
+                    i += 1
+                    bin_value.append(cmd_body[i])
+                    if not cmd_body[i] & 0x80:
+                        break
+                new_trigger['value'] = uleb128_decode(bin_value)
+                i += 1
+                name_len = cmd_body[i]
+                new_trigger['name'] = cmd_body[i+1:i+1+name_len].decode('ascii')
+                i += 1 + name_len
+                triggers.append(new_trigger)
+            dev_props['triggers'] = triggers
+            data['dev_props'] = dev_props
+        # STATUS
+        elif cmd == 4:
+            values = []
+            values_len = cmd_body[0]
+            i = 0
+            for _ in range(values_len):
+                bin_value = bytearray()
+                while True:
+                    i += 1
+                    bin_value.append(cmd_body[i])
+                    if not cmd_body[i] & 0x80:
+                        break
+                values.append(uleb128_decode(bin_value))
+            data['values'] = values
+
+    # Clock
     if dev_type == 6:
+        # WHOISHERE, IAMHERE
         if cmd == 2:
             data['dev_name'] = cmd_body[1:].decode('ascii')
+        # TICK
         elif cmd == 6:
             timestamp = uleb128_decode(cmd_body)
             data['timestamp'] = timestamp
-    elif dev_type == 4:
-        if cmd == 2:
+
+    # Lamp and Socket
+    elif dev_type == 4 or dev_type == 5:
+        # WHOISHERE, IAMHERE
+        if cmd == 2 or cmd == 1:
             data['dev_name'] = cmd_body[1:].decode('ascii')
+        # STATUS
+        elif cmd == 4:
+            data['value'] = cmd_body[0]
+
+    # Switch
     elif dev_type == 3:
-        if cmd == 2:
+        # WHOISHERE, IAMHERE
+        if cmd == 1 or cmd == 2:
             length = cmd_body[0]
             data['dev_name'] = cmd_body[1:length + 1].decode('ascii')
             dev_names = []
@@ -92,7 +148,12 @@ def decode_cmd_body(cmd_body: bytes | bytearray, dev_type: int, cmd: int) -> dic
                 new_name = cmd_body[i+1:i+1+length].decode('ascii')
                 dev_names.append(new_name)
                 i += length + 1
-            data['dev_names'] = dev_names
+            data['dev_props'] = dict()
+            data['dev_props']['dev_names'] = dev_names
+        # STATUS
+        elif cmd == 4:
+            data['value'] = cmd_body[0]
+
     return data
 
 
