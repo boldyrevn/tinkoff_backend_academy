@@ -36,17 +36,25 @@ def uleb128_decode(b: bytes | bytearray) -> int:
     return r
 
 
-def make_cmd_body(cmd: int, **kwargs) -> bytes:
+def make_cmd_body(cmd: int, kwargs: dict) -> bytearray:
+    b = bytearray()
     # WHOISHERE, IAMHERE
     if cmd == 1 or cmd == 2:
-        b = [len(kwargs['dev_name'])]
+        b.append(len(kwargs['dev_name']))
         dev_name = kwargs['dev_name'].encode()
         b.extend(dev_name)
-        return bytes(b)
+    # GETSTATUS
+    elif cmd == 3:
+        pass
+    # SETSTATUS
+    elif cmd == 5:
+        b.append(kwargs['value'])
+    return b
 
 
-def make_payload(src: int, dst: int, serial: int, dev_type: int, cmd: int, cmd_body: bytes) -> bytes:
-    payload = []
+def make_payload(src: int, dst: int, serial: int, dev_type: int, cmd: int, kwargs: dict) -> bytearray:
+    payload = bytearray()
+    cmd_body = make_cmd_body(cmd, kwargs)
 
     payload.extend(uleb128_encode(src))
     payload.extend(uleb128_encode(dst))
@@ -55,21 +63,24 @@ def make_payload(src: int, dst: int, serial: int, dev_type: int, cmd: int, cmd_b
     payload.append(dev_type)
     payload.append(cmd)
     payload.extend(cmd_body)
-    return bytes(payload)
+    return payload
 
 
-def make_packet(payload: bytes) -> bytes:
-    packet = []
+def make_packet(src: int, dst: int, serial: int, dev_type: int, cmd: int, **kwargs) -> str:
+    packet = bytearray()
+    payload = make_payload(src, dst, serial, dev_type, cmd, kwargs)
+
     length = len(payload)
     check_summ = crc8(payload)
     packet.append(length)
     packet.extend(payload)
     packet.append(check_summ)
-    return bytes(packet)
+    return base64.urlsafe_b64encode(packet).decode('ascii').rstrip('=')
 
 
 def decode_cmd_body(cmd_body: bytes | bytearray, dev_type: int, cmd: int) -> dict:
     data = dict()
+
     # EnvSensor
     if dev_type == 2:
         # WHOISHERE, IAMHERE
@@ -81,7 +92,6 @@ def decode_cmd_body(cmd_body: bytes | bytearray, dev_type: int, cmd: int) -> dic
             dev_props['sensors'] = cmd_body[i]
             i += 1
             array_len = cmd_body[i]
-            print(f"{array_len=}")
             triggers: list[dict] = []
             i += 1
             for _ in range(array_len):
@@ -101,6 +111,7 @@ def decode_cmd_body(cmd_body: bytes | bytearray, dev_type: int, cmd: int) -> dic
                 triggers.append(new_trigger)
             dev_props['triggers'] = triggers
             data['dev_props'] = dev_props
+
         # STATUS
         elif cmd == 4:
             values = []
@@ -213,21 +224,12 @@ def decode_packets(packets: bytes) -> list[dict]:
 
 
 def main() -> None:
-    # my_cmd_body = make_cmd_body(1, dev_name='kabanchik')
-    # my_packet = make_packet(make_payload(819, 16383, 1, 1, 1, my_cmd_body))
-    # bcode = base64.urlsafe_b64encode(my_packet).decode('ascii').rstrip('=')
-    # print(bcode)
-    #
-    # r = requests.post("http://localhost:9998", data=bcode)
-    # print(r.content)
-    # decoded_content = base64.urlsafe_b64decode(r.content + b'==')
+    new_packet = make_packet(1, 5, 20, 5, 5, value=1)
+    print(new_packet)
+
+    # decode_string = input().encode('ascii')
+    # decoded_content = base64.urlsafe_b64decode(decode_string + b'==')
     # pprint.pprint(decode_packets(decoded_content))
-    # r = requests.post("http://localhost:9998")
-    # decoded_content = base64.urlsafe_b64decode(r.content + b'==')
-    # pprint.pprint(decode_packets(decoded_content))
-    decode_string = input().encode('ascii')
-    decoded_content = base64.urlsafe_b64decode(decode_string + b'==')
-    pprint.pprint(decode_packets(decoded_content))
 
 
 if __name__ == "__main__":
