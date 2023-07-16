@@ -1,5 +1,4 @@
 import base64
-import pprint
 import sys
 
 import requests
@@ -100,7 +99,6 @@ def decode_cmd_body(cmd_body: bytes | bytearray, dev_type: int, cmd: int) -> dic
                     sensor_mask[n] = sensor_index
                     sensor_index += 1
                 sensors >>= 1
-            print(sensor_mask)
 
             i += 1
             array_len = cmd_body[i]
@@ -250,7 +248,6 @@ def make_request(packets: bytes | bytearray, url) -> requests.Response:
         r = requests.post(url, base64.urlsafe_b64encode(packets).decode('ascii').rstrip('='))
         assert r.status_code == 200 or r.status_code == 204
     except requests.RequestException as e:
-        print(e)
         sys.exit(99)
     except AssertionError:
         sys.exit(99)
