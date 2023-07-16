@@ -91,14 +91,33 @@ def decode_cmd_body(cmd_body: bytes | bytearray, dev_type: int, cmd: int) -> dic
             data['dev_name'] = cmd_body[1:length + 1].decode('ascii')
             dev_props = dict()
             i = length + 1
-            dev_props['sensors'] = cmd_body[i]
+
+            sensors = cmd_body[i]
+            sensor_mask = [-1] * 4
+            sensor_index = 0
+            for n in range(4):
+                if sensors & 1:
+                    sensor_mask[n] = sensor_index
+                    sensor_index += 1
+                sensors >>= 1
+            print(sensor_mask)
+
             i += 1
             array_len = cmd_body[i]
             triggers: list[dict] = []
             i += 1
             for _ in range(array_len):
                 new_trigger = dict()
-                new_trigger['op'] = cmd_body[i]
+                op = cmd_body[i]
+                op_value = op & 1
+                new_trigger['send_value'] = op_value
+                if op & 2:
+                    new_trigger['sign'] = 'more'
+                else:
+                    new_trigger['sign'] = 'less'
+                sensor_num = op >> 2
+                new_trigger['sensor_num'] = sensor_mask[sensor_num]
+
                 bin_value = bytearray()
                 while True:
                     i += 1
@@ -226,24 +245,30 @@ def decode_packets(packets: bytes) -> list[dict]:
     return decoded_packets
 
 
+def make_request(packets: bytes | bytearray, url) -> requests.Response:
+    try:
+        r = requests.post(url, base64.urlsafe_b64encode(packets).decode('ascii').rstrip('='))
+        assert r.status_code == 200 or r.status_code == 204
+    except requests.RequestException as e:
+        print(e)
+        sys.exit(99)
+    except AssertionError:
+        sys.exit(99)
+    if r.status_code == 204:
+        sys.exit(0)
+    return r
+
+
 def main() -> None:
-    # decode_string = input().encode('ascii')
-    # decoded_content = base64.urlsafe_b64decode(decode_string + b'==')
-    # pprint.pprint(decode_packets(decoded_content))
-    #
-    # return
-
-    # url = sys.argv[1]
-    # src = int(sys.argv[2], 16)
-
-    url = "http://localhost:9998"
-    src = 124
+    url = sys.argv[1]
+    src = int(sys.argv[2], 16)
 
     serial = 1
     who_is_here = make_packet(src, 0x3fff, serial, 1, 1, dev_name="HUB01")
     serial += 1
 
-    r = requests.post(url, base64.urlsafe_b64encode(who_is_here).decode('ascii').rstrip('='))
+    r = make_request(who_is_here, url)
+
     resp = base64.urlsafe_b64decode(r.content + b'==')
     resp_packets = decode_packets(resp)
 
@@ -269,9 +294,10 @@ def main() -> None:
         for packet in resp_packets[start:]:
             if packet['crc8'] != packet['real_crc8']:
                 continue
-            # IAMHERE
-            elif packet['payload']['cmd'] == 2:
-                if current_time - start_time > 300:
+
+            # IAMHERE, WHOISHERE
+            elif packet['payload']['cmd'] == 2 or packet['payload']['cmd'] == 1:
+                if packet['payload']['cmd'] == 2 and current_time - start_time > 300:
                     continue
                 addres = packet['payload']['src']
                 dev_type = packet['payload']['dev_type']
@@ -282,11 +308,16 @@ def main() -> None:
                 devs[dev_name]['type'] = dev_type
                 if dev_type == 2 or dev_type == 3:
                     devs[dev_name]['props'] = packet['payload']['cmd_body']['dev_props']
-                if dev_type != 6:
+                if dev_type != 6 and packet['payload']['cmd'] == 2:
                     get_status = make_packet(src, addres, serial, dev_type, 3)
                     serial += 1
                     send_packets.extend(get_status)
                     devs[dev_name]['get_time'] = current_time
+                if packet['payload']['cmd'] == 1:
+                    i_am_here = make_packet(src, 0x3fff, serial, 1, 2, dev_name="HUB01")
+                    serial += 1
+                    send_packets.extend(i_am_here)
+
             # STATUS
             elif packet['payload']['cmd'] == 4:
                 if packet['payload']['src'] not in name_by_addr.keys():
@@ -295,39 +326,47 @@ def main() -> None:
                 dev_name = name_by_addr[addr]
                 dev_type = packet['payload']['dev_type']
                 devs[dev_name].pop('get_time', None)
+
+                # EnvSensor
                 if dev_type == 2:
-                    devs[dev_name]['status'] = packet['payload']['cmd_body']['values']
+                    sensors_values = packet['payload']['cmd_body']['values']
+                    devs[dev_name]['status'] = sensors_values
+                    for trigger in devs[dev_name]['props']['triggers']:
+                        if trigger['sign'] == 'less' and sensors_values[trigger['sensor_num']] < trigger['value'] or \
+                           trigger['sign'] == 'more' and sensors_values[trigger['sensor_num']] > trigger['value']:
+                            send_name = trigger['name']
+                            devs[send_name]['get_time'] = current_time
+                            send_addr = devs[send_name]['addres']
+                            send_type = devs[send_name]['type']
+                            send_value = trigger['send_value']
+                            set_status = make_packet(src, send_addr, serial, send_type, 5, value=send_value)
+                            serial += 1
+                            send_packets.extend(set_status)
+
+                # Switch
                 elif dev_type == 3:
                     devs[dev_name]['status'] = packet['payload']['cmd_body']['value']
                     for send_name in devs[dev_name]['props']['dev_names']:
-                        devs[send_name]['get_time'] = current_time
-                        send_addr = devs[send_name]['addres']
-                        send_type = devs[send_name]['type']
-                        set_status = make_packet(src, send_addr, serial, send_type, 5, value=devs[dev_name]['status'])
-                        serial += 1
-                        send_packets.extend(set_status)
+                        if send_name in devs.keys():
+                            devs[send_name]['get_time'] = current_time
+                            send_addr = devs[send_name]['addres']
+                            send_type = devs[send_name]['type']
+                            send_value = devs[dev_name]['status']
+                            set_status = make_packet(src, send_addr, serial, send_type, 5, value=send_value)
+                            serial += 1
+                            send_packets.extend(set_status)
+
+                # Lamp or Socket
                 elif dev_type == 4 or dev_type == 5:
                     devs[dev_name]['status'] = packet['payload']['cmd_body']['value']
 
-        try:
-            r = requests.post(url, base64.urlsafe_b64encode(send_packets).decode('ascii').rstrip('='))
-            assert r.status_code == 200 or r.status_code == 204
-        except requests.RequestException:
-            print('http error')
-            sys.exit(99)
-        except AssertionError:
-            pprint.pprint(decode_packets(send_packets))
-            print(base64.urlsafe_b64encode(send_packets).decode('ascii').rstrip('='))
-            print('wrong status code')
-            sys.exit(99)
-
-        if r.status_code == 204:
-            sys.exit(0)
+        r = make_request(send_packets, url)
 
         try:
             resp = base64.urlsafe_b64decode(r.content + b'==')
             resp_packets = decode_packets(resp)
         except IndexError:
+            resp_packets = bytearray()
             continue
 
 
