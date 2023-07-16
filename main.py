@@ -1,5 +1,6 @@
 import base64
 import pprint
+import sys
 
 import requests
 
@@ -66,7 +67,7 @@ def make_payload(src: int, dst: int, serial: int, dev_type: int, cmd: int, kwarg
     return payload
 
 
-def make_packet(src: int, dst: int, serial: int, dev_type: int, cmd: int, **kwargs) -> str:
+def make_packet(src: int, dst: int, serial: int, dev_type: int, cmd: int, **kwargs) -> bytes:
     packet = bytearray()
     payload = make_payload(src, dst, serial, dev_type, cmd, kwargs)
 
@@ -75,7 +76,8 @@ def make_packet(src: int, dst: int, serial: int, dev_type: int, cmd: int, **kwar
     packet.append(length)
     packet.extend(payload)
     packet.append(check_summ)
-    return base64.urlsafe_b64encode(packet).decode('ascii').rstrip('=')
+    return packet
+    # return base64.urlsafe_b64encode(packet).decode('ascii').rstrip('=')
 
 
 def decode_cmd_body(cmd_body: bytes | bytearray, dev_type: int, cmd: int) -> dict:
@@ -162,7 +164,7 @@ def decode_cmd_body(cmd_body: bytes | bytearray, dev_type: int, cmd: int) -> dic
             data['dev_props'] = dict()
             data['dev_props']['dev_names'] = dev_names
         # STATUS
-        elif cmd == 4:
+        elif cmd == 4 or cmd == 5:
             data['value'] = cmd_body[0]
 
     return data
@@ -209,6 +211,7 @@ def decode_packet(packet: bytes) -> dict:
     payload = decode_payload(bin_payload)
     data['payload'] = payload
     data['crc8'] = packet[length + 1]
+    data['real_crc8'] = crc8(bin_payload)
     return data
 
 
@@ -224,12 +227,108 @@ def decode_packets(packets: bytes) -> list[dict]:
 
 
 def main() -> None:
-    new_packet = make_packet(1, 5, 20, 5, 5, value=1)
-    print(new_packet)
-
     # decode_string = input().encode('ascii')
     # decoded_content = base64.urlsafe_b64decode(decode_string + b'==')
     # pprint.pprint(decode_packets(decoded_content))
+    #
+    # return
+
+    # url = sys.argv[1]
+    # src = int(sys.argv[2], 16)
+
+    url = "http://localhost:9998"
+    src = 124
+
+    serial = 1
+    who_is_here = make_packet(src, 0x3fff, serial, 1, 1, dev_name="HUB01")
+    serial += 1
+
+    r = requests.post(url, base64.urlsafe_b64encode(who_is_here).decode('ascii').rstrip('='))
+    resp = base64.urlsafe_b64decode(r.content + b'==')
+    resp_packets = decode_packets(resp)
+
+    start_time = resp_packets[0]['payload']['cmd_body']['timestamp']
+    current_time = start_time
+
+    devs = dict()
+    name_by_addr = dict()
+
+    while True:
+        start = 0
+        if len(resp_packets) > 0 and resp_packets[0]['payload']['cmd'] == 6 and\
+                resp_packets[0]['crc8'] == resp_packets[0]['real_crc8']:
+            current_time = resp_packets[0]['payload']['cmd_body']['timestamp']
+            start = 1
+        addrs = list(name_by_addr.keys())
+        for addr in addrs:
+            dev_name = name_by_addr[addr]
+            if current_time - devs[dev_name].get('get_time', current_time) > 300:
+                name_by_addr.pop(addr)
+                devs.pop(dev_name)
+        send_packets = bytearray()
+        for packet in resp_packets[start:]:
+            if packet['crc8'] != packet['real_crc8']:
+                continue
+            # IAMHERE
+            elif packet['payload']['cmd'] == 2:
+                if current_time - start_time > 300:
+                    continue
+                addres = packet['payload']['src']
+                dev_type = packet['payload']['dev_type']
+                dev_name = packet['payload']['cmd_body']['dev_name']
+                name_by_addr[addres] = dev_name
+                devs[dev_name] = dict()
+                devs[dev_name]['addres'] = addres
+                devs[dev_name]['type'] = dev_type
+                if dev_type == 2 or dev_type == 3:
+                    devs[dev_name]['props'] = packet['payload']['cmd_body']['dev_props']
+                if dev_type != 6:
+                    get_status = make_packet(src, addres, serial, dev_type, 3)
+                    serial += 1
+                    send_packets.extend(get_status)
+                    devs[dev_name]['get_time'] = current_time
+            # STATUS
+            elif packet['payload']['cmd'] == 4:
+                if packet['payload']['src'] not in name_by_addr.keys():
+                    continue
+                addr = packet['payload']['src']
+                dev_name = name_by_addr[addr]
+                dev_type = packet['payload']['dev_type']
+                devs[dev_name].pop('get_time', None)
+                if dev_type == 2:
+                    devs[dev_name]['status'] = packet['payload']['cmd_body']['values']
+                elif dev_type == 3:
+                    devs[dev_name]['status'] = packet['payload']['cmd_body']['value']
+                    for send_name in devs[dev_name]['props']['dev_names']:
+                        devs[send_name]['get_time'] = current_time
+                        send_addr = devs[send_name]['addres']
+                        send_type = devs[send_name]['type']
+                        set_status = make_packet(src, send_addr, serial, send_type, 5, value=devs[dev_name]['status'])
+                        serial += 1
+                        send_packets.extend(set_status)
+                elif dev_type == 4 or dev_type == 5:
+                    devs[dev_name]['status'] = packet['payload']['cmd_body']['value']
+
+        try:
+            r = requests.post(url, base64.urlsafe_b64encode(send_packets).decode('ascii').rstrip('='))
+            assert r.status_code == 200 or r.status_code == 204
+        except requests.RequestException:
+            print('http error')
+            sys.exit(99)
+        except AssertionError:
+            pprint.pprint(decode_packets(send_packets))
+            print(base64.urlsafe_b64encode(send_packets).decode('ascii').rstrip('='))
+            print('wrong status code')
+            sys.exit(99)
+
+        if r.status_code == 204:
+            sys.exit(0)
+
+        try:
+            resp = base64.urlsafe_b64decode(r.content + b'==')
+            resp_packets = decode_packets(resp)
+        except IndexError:
+            continue
 
 
 if __name__ == "__main__":
